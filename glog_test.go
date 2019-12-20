@@ -28,6 +28,10 @@ import (
 	"time"
 )
 
+func Test_glog(t *testing.T) {
+	Error(123)
+}
+
 // Test that shortHostname works as advertised.
 func TestShortHostname(t *testing.T) {
 	for hostname, expect := range map[string]string{
