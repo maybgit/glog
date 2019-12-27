@@ -1190,33 +1190,35 @@ func writeLog(data string, level int) (r *Reply) {
 			stdLog.Println(err)
 		}
 	}()
+	//配置了grpc日志服务地址，才进行grpc日志写入
+	if Config.LogService.Address != "" {
+		conn, err := grpc.Dial(Config.LogService.Address, grpc.WithInsecure())
+		defer conn.Close()
+		client := NewLogClient(conn)
 
-	conn, err := grpc.Dial(Config.LogService.Address, grpc.WithInsecure())
-	defer conn.Close()
-	client := NewLogClient(conn)
+		ctx, cf := context.WithTimeout(context.Background(), time.Second*60)
+		defer cf()
 
-	ctx, cf := context.WithTimeout(context.Background(), time.Second*60)
-	defer cf()
+		sps := strings.Split(data, "]")
 
-	sps := strings.Split(data, "]")
+		m := LogRequest{}
+		m.Logger = sps[0]
+		m.Appid = Config.LogService.Appid
+		m.Message = strings.Join(sps[1:], "]")
 
-	m := LogRequest{}
-	m.Logger = sps[0]
-	m.Appid = Config.LogService.Appid
-	m.Message = strings.Join(sps[1:], "]")
-
-	switch level {
-	case 0:
-		r, err = client.Info(ctx, &m)
-	case 1:
-		r, err = client.Warn(ctx, &m)
-	case 2:
-		r, err = client.Error(ctx, &m)
-	case 3:
-		r, err = client.Fatal(ctx, &m)
-	}
-	if err != nil {
-		panic(err)
+		switch level {
+		case 0:
+			r, err = client.Info(ctx, &m)
+		case 1:
+			r, err = client.Warn(ctx, &m)
+		case 2:
+			r, err = client.Error(ctx, &m)
+		case 3:
+			r, err = client.Fatal(ctx, &m)
+		}
+		if err != nil {
+			panic(err)
+		}
 	}
 	return
 }
