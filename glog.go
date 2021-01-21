@@ -73,7 +73,7 @@ package glog
 import (
 	"bufio"
 	"bytes"
-	"context"
+	context "context"
 	"errors"
 	"flag"
 	"fmt"
@@ -88,7 +88,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	"google.golang.org/grpc"
+	grpc "google.golang.org/grpc"
 )
 
 // severity identifies the sort of log: info, warning etc. It also implements
@@ -411,6 +411,7 @@ func init() {
 
 	logging.setVState(0, nil, false)
 	go logging.flushDaemon()
+	go consumeQueue()
 }
 
 // Flush flushes all pending log I/O.
@@ -632,8 +633,9 @@ func (buf *buffer) someDigits(i, d int) int {
 
 func (l *loggingT) println(s severity, args ...interface{}) {
 	buf, file, line := l.header(s, 0)
+	logger := buf.Bytes()
 	fmt.Fprintln(buf, args...)
-	l.output(s, buf, file, line, false)
+	l.output(s, buf, logger, file, line, false)
 }
 
 func (l *loggingT) print(s severity, args ...interface{}) {
@@ -642,20 +644,22 @@ func (l *loggingT) print(s severity, args ...interface{}) {
 
 func (l *loggingT) printDepth(s severity, depth int, args ...interface{}) {
 	buf, file, line := l.header(s, depth)
+	logger := buf.Bytes()
 	fmt.Fprint(buf, args...)
 	if buf.Bytes()[buf.Len()-1] != '\n' {
 		buf.WriteByte('\n')
 	}
-	l.output(s, buf, file, line, false)
+	l.output(s, buf, logger, file, line, false)
 }
 
 func (l *loggingT) printf(s severity, format string, args ...interface{}) {
 	buf, file, line := l.header(s, 0)
+	logger := buf.Bytes()
 	fmt.Fprintf(buf, format, args...)
 	if buf.Bytes()[buf.Len()-1] != '\n' {
 		buf.WriteByte('\n')
 	}
-	l.output(s, buf, file, line, false)
+	l.output(s, buf, logger, file, line, false)
 }
 
 // printWithFileLine behaves like print but uses the provided file and line number.  If
@@ -663,15 +667,16 @@ func (l *loggingT) printf(s severity, format string, args ...interface{}) {
 // will also appear in the log file unless --logtostderr is set.
 func (l *loggingT) printWithFileLine(s severity, file string, line int, alsoToStderr bool, args ...interface{}) {
 	buf := l.formatHeader(s, file, line)
+	logger := buf.Bytes()
 	fmt.Fprint(buf, args...)
 	if buf.Bytes()[buf.Len()-1] != '\n' {
 		buf.WriteByte('\n')
 	}
-	l.output(s, buf, file, line, alsoToStderr)
+	l.output(s, buf, logger, file, line, alsoToStderr)
 }
 
 // output writes the data to the log files and releases the buffer.
-func (l *loggingT) output(s severity, buf *buffer, file string, line int, alsoToStderr bool) {
+func (l *loggingT) output(s severity, buf *buffer, logger []byte, file string, line int, alsoToStderr bool) {
 	l.mu.Lock()
 	if l.traceLocation.isSet() {
 		if l.traceLocation.match(file, line) {
@@ -679,7 +684,9 @@ func (l *loggingT) output(s severity, buf *buffer, file string, line int, alsoTo
 		}
 	}
 	data := buf.Bytes()
-	go writeLog(string(data), int(s))
+
+	pushQueue(logger, string(data), int(s))
+
 	if !flag.Parsed() {
 		os.Stderr.Write([]byte("ERROR: logging before flag.Parse: "))
 		os.Stderr.Write(data)
@@ -1183,42 +1190,64 @@ func Exitf(format string, args ...interface{}) {
 	logging.printf(fatalLog, format, args...)
 }
 
+var (
+	ch = make(chan *ChMessage, 10000)
+)
+
+type ChMessage struct {
+	Level    int
+	LogModel *LogRequest
+}
+
 //grpc logserver
-func writeLog(data string, level int) (r *Reply) {
-	defer func() {
-		if err := recover(); err != nil {
-			stdLog.Println(err)
-		}
-	}()
-	//配置了grpc日志服务地址，才进行grpc日志写入
+func consumeQueue() {
 	if Config.LogService.Address != "" {
-		conn, err := grpc.Dial(Config.LogService.Address, grpc.WithInsecure())
-		defer conn.Close()
-		client := NewLogClient(conn)
-
-		ctx, cf := context.WithTimeout(context.Background(), time.Second*60)
-		defer cf()
-
-		sps := strings.Split(data, "]")
-
-		m := LogRequest{}
-		m.Logger = sps[0]
-		m.Appid = Config.LogService.Appid
-		m.Message = strings.Join(sps[1:], "]")
-
-		switch level {
-		case 0:
-			r, err = client.Info(ctx, &m)
-		case 1:
-			r, err = client.Warn(ctx, &m)
-		case 2:
-			r, err = client.Error(ctx, &m)
-		case 3:
-			r, err = client.Fatal(ctx, &m)
+		getConn := func() *grpc.ClientConn {
+			conn, err := grpc.Dial(
+				Config.LogService.Address,
+				grpc.WithInsecure(),
+				grpc.WithBlock(),
+				// grpc.WithKeepaliveParams(keepalive.ClientParameters{
+				// 	Time:                time.Second * 10,
+				// 	PermitWithoutStream: true,
+				// }),
+			)
+			if err != nil {
+				stdLog.Println(err)
+			}
+			return conn
 		}
-		if err != nil {
-			panic(err)
+
+		for i := 0; i < 5; i++ {
+			go func() {
+				conn := getConn()
+				ctx := context.Background()
+				client := NewLogClient(conn)
+				for m := range ch {
+					switch m.Level {
+					case 0:
+						client.Info(ctx, m.LogModel)
+					case 1:
+						client.Warn(ctx, m.LogModel)
+					case 2:
+						client.Error(ctx, m.LogModel)
+					case 3:
+						client.Fatal(ctx, m.LogModel)
+					}
+				}
+			}()
 		}
 	}
-	return
+}
+
+func pushQueue(logger []byte, data string, level int) {
+	g := string(logger)
+	ch <- &ChMessage{
+		Level: level,
+		LogModel: &LogRequest{
+			Logger:  g,
+			Appid:   Config.LogService.Appid,
+			Message: data[len(g):],
+		},
+	}
 }

@@ -29,7 +29,8 @@ import (
 )
 
 func Test_glog(t *testing.T) {
-	Error(123)
+	Info("a",1,"b",2,3)
+	time.Sleep(time.Second * 2)
 }
 
 // Test that shortHostname works as advertised.
