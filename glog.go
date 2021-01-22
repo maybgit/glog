@@ -685,7 +685,8 @@ func (l *loggingT) output(s severity, buf *buffer, logger []byte, file string, l
 	}
 	data := buf.Bytes()
 
-	pushQueue(logger, string(data), int(s))
+	//TODO 用协程，压测试的时候，内存涨得厉害，不用协程，当chan超过最大限制的时候，会阻塞
+	go pushQueue(logger, string(data), int(s))
 
 	if !flag.Parsed() {
 		os.Stderr.Write([]byte("ERROR: logging before flag.Parse: "))
